@@ -24,6 +24,8 @@ ASTRO_ORGANIZATION_ID = os.environ["ASTRO_ORGANIZATION_ID"]
 ASTRO_API_KEY = os.environ["ASTRO_API_KEY"]
 DR_DEPLOYMENTS = json.loads(os.environ.get("DR_DEPLOYMENTS", "{}"))
 """A mapping from active deployment IDs to standby deployment IDs."""
+DR_SCHEDULE = os.getenv("DR_SCHEDULE")
+"""Cron schedule for DR replication Dag."""
 
 
 @task
@@ -352,7 +354,7 @@ dr_replication()
 
 
 @dag(
-    schedule=None,
+    schedule=DR_SCHEDULE,
     catchup=False,
     tags=["DR"],
     default_args={

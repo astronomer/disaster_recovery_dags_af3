@@ -15,6 +15,7 @@ The following environment variables can be used to configure the DR dags.
 | `ASTRO_API_KEY` | A API token with the owner permissions for the active and standby deployments. |
 | `ASTRO_ORGANIZATION_ID` | The Astronomer organization ID. |
 | `DR_DEPLOYMENTS` | A JSON mapping of deployment IDs from active to standby. |
+| `DR_SCHEDULE` | Cron schedule for DR replication dag. |
 
 ### Active & standby deployments
 
