@@ -269,7 +269,7 @@ def set_failover_state():
         "dr_failover_enabled",
         enable_failover,
         serialize_json=True,
-        description="Whether the system is in failover state.",
+        description="Whether the system is in failover state or not.",
     )
 
 
@@ -338,7 +338,7 @@ def failover(active: Deployment, standby: Deployment):
 
 
 @dag(
-    schedule=None,  # TODO set schedule
+    schedule=DR_SCHEDULE,
     catchup=False,
     tags=["DR"],
     default_args={
@@ -356,7 +356,7 @@ dr_replication()
 
 
 @dag(
-    schedule=DR_SCHEDULE,
+    schedule=None,
     catchup=False,
     tags=["DR"],
     default_args={
