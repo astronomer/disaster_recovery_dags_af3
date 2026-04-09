@@ -20,17 +20,19 @@ logger = logging.getLogger(__name__)
 SUPPORTED_AIRFLOW_VERSIONS = SpecifierSet("~=3.0,<3.2")
 SUPPORTED_STARSHIP_VERSIONS = SpecifierSet("~=2.8")
 
-ASTRO_ORGANIZATION_ID = os.environ["ASTRO_ORGANIZATION_ID"]
-ASTRO_API_KEY = os.environ["ASTRO_API_KEY"]
+DR_API_KEY = os.environ["DR_API_KEY"]
+"""An API token with owner permissions for the active and standby deployments."""
 DR_DEPLOYMENTS = json.loads(os.environ.get("DR_DEPLOYMENTS", "{}"))
-"""A mapping from active deployment IDs to standby deployment IDs."""
+"""A mapping of deployment IDs from active to standby."""
+DR_ORGANIZATION_ID = os.environ["DR_ORGANIZATION_ID"]
+"""The ID of the Astronomer organization containing the deployments."""
 DR_SCHEDULE = os.getenv("DR_SCHEDULE")
 """Cron schedule for DR replication Dag."""
 
 
 @task
 def get_deployments() -> list[dict[str, Deployment]]:
-    astro_client = AstroApiClient(ASTRO_ORGANIZATION_ID, ASTRO_API_KEY)
+    astro_client = AstroApiClient(DR_ORGANIZATION_ID, DR_API_KEY)
     deployments = []
     is_failover = Variable.get("dr_failover_enabled", default=False, deserialize_json=True)
 
@@ -57,7 +59,7 @@ def set_hibernation(deployment: Deployment, is_hibernating: bool) -> DeploymentH
         logger.info("Deployment %s is not in development mode, skipping", deployment.name)
         return None
 
-    astro_client = AstroApiClient(ASTRO_ORGANIZATION_ID, ASTRO_API_KEY)
+    astro_client = AstroApiClient(DR_ORGANIZATION_ID, DR_API_KEY)
     deployment = astro_client.get_deployment(deployment.id)
 
     if deployment.scaling_spec is not None and deployment.scaling_spec.hibernation_spec is not None:
@@ -74,7 +76,7 @@ def set_hibernation(deployment: Deployment, is_hibernating: bool) -> DeploymentH
 
 @task.sensor(poke_interval=10, timeout=600, mode="poke")
 def wait_for_deployment_wake_up(deployment: Deployment) -> PokeReturnValue:
-    astro_client = AstroApiClient(ASTRO_ORGANIZATION_ID, ASTRO_API_KEY)
+    astro_client = AstroApiClient(DR_ORGANIZATION_ID, DR_API_KEY)
     deployment = astro_client.get_deployment(deployment.id)
 
     logger.info(
@@ -92,7 +94,7 @@ def wait_for_deployment_wake_up(deployment: Deployment) -> PokeReturnValue:
 
 @task
 def use_job_schedule(deployment: Deployment, use: bool) -> None:
-    astro_client = AstroApiClient(ASTRO_ORGANIZATION_ID, ASTRO_API_KEY)
+    astro_client = AstroApiClient(DR_ORGANIZATION_ID, DR_API_KEY)
     deployment = astro_client.get_deployment(deployment.id)
 
     astro_client.update_deployment(
@@ -106,7 +108,7 @@ def revert_hibernation(deployment: Deployment, override: DeploymentHibernationOv
         logger.info("Deployment %s is not in development mode, skipping", deployment.name)
         return None
 
-    astro_client = AstroApiClient(ASTRO_ORGANIZATION_ID, ASTRO_API_KEY)
+    astro_client = AstroApiClient(DR_ORGANIZATION_ID, DR_API_KEY)
     deployment = astro_client.get_deployment(deployment.id)
 
     if override is not None:
@@ -123,8 +125,8 @@ def revert_hibernation(deployment: Deployment, override: DeploymentHibernationOv
 
 @task
 def check_version(active: Deployment, standby: Deployment) -> None:
-    starship_act = StarshipClient(active.ui_url, ASTRO_API_KEY)
-    starship_sby = StarshipClient(standby.ui_url, ASTRO_API_KEY)
+    starship_act = StarshipClient(active.ui_url, DR_API_KEY)
+    starship_sby = StarshipClient(standby.ui_url, DR_API_KEY)
     info_act = starship_act.get_info()
     info_sby = starship_sby.get_info()
 
@@ -159,8 +161,8 @@ def check_version(active: Deployment, standby: Deployment) -> None:
 
 @task
 def dags_paused(active: Deployment, standby: Deployment) -> None:
-    starship_act = StarshipClient(active.ui_url, ASTRO_API_KEY)
-    starship_sby = StarshipClient(standby.ui_url, ASTRO_API_KEY)
+    starship_act = StarshipClient(active.ui_url, DR_API_KEY)
+    starship_sby = StarshipClient(standby.ui_url, DR_API_KEY)
 
     for d in starship_act.get_dags():
         starship_sby.set_dag_paused(d.dag_id, d.is_paused)
@@ -168,8 +170,8 @@ def dags_paused(active: Deployment, standby: Deployment) -> None:
 
 @task
 def dag_runs(active: Deployment, standby: Deployment) -> None:
-    starship_act = StarshipClient(active.ui_url, ASTRO_API_KEY)
-    starship_sby = StarshipClient(standby.ui_url, ASTRO_API_KEY)
+    starship_act = StarshipClient(active.ui_url, DR_API_KEY)
+    starship_sby = StarshipClient(standby.ui_url, DR_API_KEY)
 
     limit = 100
     for d in starship_act.get_dags():
@@ -187,8 +189,8 @@ def dag_runs(active: Deployment, standby: Deployment) -> None:
 
 @task
 def task_instances(active: Deployment, standby: Deployment) -> None:
-    starship_act = StarshipClient(active.ui_url, ASTRO_API_KEY)
-    starship_sby = StarshipClient(standby.ui_url, ASTRO_API_KEY)
+    starship_act = StarshipClient(active.ui_url, DR_API_KEY)
+    starship_sby = StarshipClient(standby.ui_url, DR_API_KEY)
 
     limit = 10
     for d in starship_act.get_dags():
@@ -204,8 +206,8 @@ def task_instances(active: Deployment, standby: Deployment) -> None:
 
 @task
 def task_instance_history(active: Deployment, standby: Deployment) -> None:
-    starship_act = StarshipClient(active.ui_url, ASTRO_API_KEY)
-    starship_sby = StarshipClient(standby.ui_url, ASTRO_API_KEY)
+    starship_act = StarshipClient(active.ui_url, DR_API_KEY)
+    starship_sby = StarshipClient(standby.ui_url, DR_API_KEY)
 
     limit = 10
     for d in starship_act.get_dags():
@@ -221,8 +223,8 @@ def task_instance_history(active: Deployment, standby: Deployment) -> None:
 
 @task
 def variables(active: Deployment, standby: Deployment) -> None:
-    starship_act = StarshipClient(active.ui_url, ASTRO_API_KEY)
-    starship_sby = StarshipClient(standby.ui_url, ASTRO_API_KEY)
+    starship_act = StarshipClient(active.ui_url, DR_API_KEY)
+    starship_sby = StarshipClient(standby.ui_url, DR_API_KEY)
 
     for variable in starship_sby.get_variables():
         starship_sby.delete_variable(variable.key)
@@ -233,8 +235,8 @@ def variables(active: Deployment, standby: Deployment) -> None:
 
 @task
 def connections(active: Deployment, standby: Deployment) -> None:
-    starship_act = StarshipClient(active.ui_url, ASTRO_API_KEY)
-    starship_sby = StarshipClient(standby.ui_url, ASTRO_API_KEY)
+    starship_act = StarshipClient(active.ui_url, DR_API_KEY)
+    starship_sby = StarshipClient(standby.ui_url, DR_API_KEY)
 
     for connection in starship_sby.get_connections():
         starship_sby.delete_connection(connection.conn_id)
@@ -245,8 +247,8 @@ def connections(active: Deployment, standby: Deployment) -> None:
 
 @task
 def pools(active: Deployment, standby: Deployment) -> None:
-    starship_act = StarshipClient(active.ui_url, ASTRO_API_KEY)
-    starship_sby = StarshipClient(standby.ui_url, ASTRO_API_KEY)
+    starship_act = StarshipClient(active.ui_url, DR_API_KEY)
+    starship_sby = StarshipClient(standby.ui_url, DR_API_KEY)
 
     for pool in starship_sby.get_pools():
         if pool.is_default:
