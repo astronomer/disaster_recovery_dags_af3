@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 from datetime import timedelta
 
 from airflow.exceptions import AirflowFailException
@@ -20,15 +21,21 @@ logger = logging.getLogger(__name__)
 SUPPORTED_AIRFLOW_VERSIONS = SpecifierSet("~=3.0,<3.2")
 SUPPORTED_STARSHIP_VERSIONS = SpecifierSet("~=2.8")
 
-ASTRO_ORGANIZATION_ID = os.environ["ASTRO_ORGANIZATION_ID"]
-ASTRO_API_KEY = os.environ["ASTRO_API_KEY"]
+DR_API_KEY = os.environ["DR_API_KEY"]
+"""An API token with owner permissions for the active and standby deployments."""
 DR_DEPLOYMENTS = json.loads(os.environ.get("DR_DEPLOYMENTS", "{}"))
-"""A mapping from active deployment IDs to standby deployment IDs."""
+"""A mapping of deployment IDs from active to standby."""
+DR_ORGANIZATION_ID = os.environ["DR_ORGANIZATION_ID"]
+"""The ID of the Astronomer organization containing the deployments."""
+DR_SCHEDULE = os.getenv("DR_SCHEDULE")
+"""Cron schedule for DR replication Dag."""
+DR_WAKE_WAIT_PERIOD = int(os.getenv("DR_WAKE_WAIT_PERIOD", 60))
+"""Time in seconds to wait after triggering a wake up before checking deployment status."""
 
 
 @task
 def get_deployments() -> list[dict[str, Deployment]]:
-    astro_client = AstroApiClient(ASTRO_ORGANIZATION_ID, ASTRO_API_KEY)
+    astro_client = AstroApiClient(DR_ORGANIZATION_ID, DR_API_KEY)
     deployments = []
     is_failover = Variable.get("dr_failover_enabled", default=False, deserialize_json=True)
 
@@ -55,7 +62,7 @@ def set_hibernation(deployment: Deployment, is_hibernating: bool) -> DeploymentH
         logger.info("Deployment %s is not in development mode, skipping", deployment.name)
         return None
 
-    astro_client = AstroApiClient(ASTRO_ORGANIZATION_ID, ASTRO_API_KEY)
+    astro_client = AstroApiClient(DR_ORGANIZATION_ID, DR_API_KEY)
     deployment = astro_client.get_deployment(deployment.id)
 
     if deployment.scaling_spec is not None and deployment.scaling_spec.hibernation_spec is not None:
@@ -71,8 +78,11 @@ def set_hibernation(deployment: Deployment, is_hibernating: bool) -> DeploymentH
 
 
 @task.sensor(poke_interval=10, timeout=600, mode="poke")
-def wait_for_deployment_wake_up(deployment: Deployment) -> PokeReturnValue:
-    astro_client = AstroApiClient(ASTRO_ORGANIZATION_ID, ASTRO_API_KEY)
+def wait_for_deployment_wake_up(
+    deployment: Deployment,
+    wake_wait_period: int = DR_WAKE_WAIT_PERIOD,
+) -> PokeReturnValue:
+    astro_client = AstroApiClient(DR_ORGANIZATION_ID, DR_API_KEY)
     deployment = astro_client.get_deployment(deployment.id)
 
     logger.info(
@@ -80,6 +90,13 @@ def wait_for_deployment_wake_up(deployment: Deployment) -> PokeReturnValue:
         deployment.status,
         deployment.is_hibernating(),
     )
+
+    # wait at least wake_wait_period seconds to allow the deployment to update its status after triggering wake up, otherwise we might check too early and get a false positive
+    if (
+        deployment.updated_at is not None
+        and int(time.time()) - int(deployment.updated_at.timestamp()) < wake_wait_period
+    ):
+        return PokeReturnValue(is_done=False)
 
     if not deployment.is_hibernating() and deployment.status == "HEALTHY":
         logger.info("Deployment %s is awake", deployment.name)
@@ -90,7 +107,7 @@ def wait_for_deployment_wake_up(deployment: Deployment) -> PokeReturnValue:
 
 @task
 def use_job_schedule(deployment: Deployment, use: bool) -> None:
-    astro_client = AstroApiClient(ASTRO_ORGANIZATION_ID, ASTRO_API_KEY)
+    astro_client = AstroApiClient(DR_ORGANIZATION_ID, DR_API_KEY)
     deployment = astro_client.get_deployment(deployment.id)
 
     astro_client.update_deployment(
@@ -104,7 +121,7 @@ def revert_hibernation(deployment: Deployment, override: DeploymentHibernationOv
         logger.info("Deployment %s is not in development mode, skipping", deployment.name)
         return None
 
-    astro_client = AstroApiClient(ASTRO_ORGANIZATION_ID, ASTRO_API_KEY)
+    astro_client = AstroApiClient(DR_ORGANIZATION_ID, DR_API_KEY)
     deployment = astro_client.get_deployment(deployment.id)
 
     if override is not None:
@@ -121,8 +138,8 @@ def revert_hibernation(deployment: Deployment, override: DeploymentHibernationOv
 
 @task
 def check_version(active: Deployment, standby: Deployment) -> None:
-    starship_act = StarshipClient(active.ui_url, ASTRO_API_KEY)
-    starship_sby = StarshipClient(standby.ui_url, ASTRO_API_KEY)
+    starship_act = StarshipClient(active.ui_url, DR_API_KEY)
+    starship_sby = StarshipClient(standby.ui_url, DR_API_KEY)
     info_act = starship_act.get_info()
     info_sby = starship_sby.get_info()
 
@@ -157,8 +174,8 @@ def check_version(active: Deployment, standby: Deployment) -> None:
 
 @task
 def dags_paused(active: Deployment, standby: Deployment) -> None:
-    starship_act = StarshipClient(active.ui_url, ASTRO_API_KEY)
-    starship_sby = StarshipClient(standby.ui_url, ASTRO_API_KEY)
+    starship_act = StarshipClient(active.ui_url, DR_API_KEY)
+    starship_sby = StarshipClient(standby.ui_url, DR_API_KEY)
 
     for d in starship_act.get_dags():
         starship_sby.set_dag_paused(d.dag_id, d.is_paused)
@@ -166,8 +183,8 @@ def dags_paused(active: Deployment, standby: Deployment) -> None:
 
 @task
 def dag_runs(active: Deployment, standby: Deployment) -> None:
-    starship_act = StarshipClient(active.ui_url, ASTRO_API_KEY)
-    starship_sby = StarshipClient(standby.ui_url, ASTRO_API_KEY)
+    starship_act = StarshipClient(active.ui_url, DR_API_KEY)
+    starship_sby = StarshipClient(standby.ui_url, DR_API_KEY)
 
     limit = 100
     for d in starship_act.get_dags():
@@ -185,8 +202,8 @@ def dag_runs(active: Deployment, standby: Deployment) -> None:
 
 @task
 def task_instances(active: Deployment, standby: Deployment) -> None:
-    starship_act = StarshipClient(active.ui_url, ASTRO_API_KEY)
-    starship_sby = StarshipClient(standby.ui_url, ASTRO_API_KEY)
+    starship_act = StarshipClient(active.ui_url, DR_API_KEY)
+    starship_sby = StarshipClient(standby.ui_url, DR_API_KEY)
 
     limit = 10
     for d in starship_act.get_dags():
@@ -202,8 +219,8 @@ def task_instances(active: Deployment, standby: Deployment) -> None:
 
 @task
 def task_instance_history(active: Deployment, standby: Deployment) -> None:
-    starship_act = StarshipClient(active.ui_url, ASTRO_API_KEY)
-    starship_sby = StarshipClient(standby.ui_url, ASTRO_API_KEY)
+    starship_act = StarshipClient(active.ui_url, DR_API_KEY)
+    starship_sby = StarshipClient(standby.ui_url, DR_API_KEY)
 
     limit = 10
     for d in starship_act.get_dags():
@@ -219,8 +236,8 @@ def task_instance_history(active: Deployment, standby: Deployment) -> None:
 
 @task
 def variables(active: Deployment, standby: Deployment) -> None:
-    starship_act = StarshipClient(active.ui_url, ASTRO_API_KEY)
-    starship_sby = StarshipClient(standby.ui_url, ASTRO_API_KEY)
+    starship_act = StarshipClient(active.ui_url, DR_API_KEY)
+    starship_sby = StarshipClient(standby.ui_url, DR_API_KEY)
 
     for variable in starship_sby.get_variables():
         starship_sby.delete_variable(variable.key)
@@ -231,8 +248,8 @@ def variables(active: Deployment, standby: Deployment) -> None:
 
 @task
 def connections(active: Deployment, standby: Deployment) -> None:
-    starship_act = StarshipClient(active.ui_url, ASTRO_API_KEY)
-    starship_sby = StarshipClient(standby.ui_url, ASTRO_API_KEY)
+    starship_act = StarshipClient(active.ui_url, DR_API_KEY)
+    starship_sby = StarshipClient(standby.ui_url, DR_API_KEY)
 
     for connection in starship_sby.get_connections():
         starship_sby.delete_connection(connection.conn_id)
@@ -243,8 +260,8 @@ def connections(active: Deployment, standby: Deployment) -> None:
 
 @task
 def pools(active: Deployment, standby: Deployment) -> None:
-    starship_act = StarshipClient(active.ui_url, ASTRO_API_KEY)
-    starship_sby = StarshipClient(standby.ui_url, ASTRO_API_KEY)
+    starship_act = StarshipClient(active.ui_url, DR_API_KEY)
+    starship_sby = StarshipClient(standby.ui_url, DR_API_KEY)
 
     for pool in starship_sby.get_pools():
         if pool.is_default:
@@ -265,7 +282,7 @@ def set_failover_state():
         "dr_failover_enabled",
         enable_failover,
         serialize_json=True,
-        description="Whether the system is in failover state.",
+        description="Whether the system is in failover state or not.",
     )
 
 
@@ -322,19 +339,19 @@ def replicate(active: Deployment, standby: Deployment):
 
 @task_group
 def failover(active: Deployment, standby: Deployment):
-    # active
-    use_job_schedule.override(task_id="disable_scheduling_active")(active, False) >> set_hibernation.override(
-        task_id="hibernate_active"
-    )(active, True)
+    # desired standby
+    use_job_schedule.override(task_id="disable_scheduling_standby")(
+        standby, False
+    ) >> set_hibernation.override(task_id="hibernate_standby")(standby, True)
 
-    # standby
-    use_job_schedule.override(task_id="enable_scheduling_standby")(standby, True) >> set_hibernation.override(
-        task_id="wake_up_standby"
-    )(standby, False)
+    # desired active
+    use_job_schedule.override(task_id="enable_scheduling_active")(active, True) >> set_hibernation.override(
+        task_id="wake_up_active"
+    )(active, False)
 
 
 @dag(
-    schedule=None,  # TODO set schedule
+    schedule=DR_SCHEDULE,
     catchup=False,
     tags=["DR"],
     default_args={
@@ -368,8 +385,8 @@ dr_replication()
     max_active_runs=1,
 )
 def dr_failover():
-    deployments = get_deployments()
-    deployments >> set_failover_state() >> failover.expand_kwargs(deployments)
+    deployments = set_failover_state() >> get_deployments()
+    failover.expand_kwargs(deployments)
 
 
 dr_failover()
