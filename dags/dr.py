@@ -326,15 +326,15 @@ def replicate(active: Deployment, standby: Deployment):
 
 @task_group
 def failover(active: Deployment, standby: Deployment):
-    # active
-    use_job_schedule.override(task_id="disable_scheduling_active")(active, False) >> set_hibernation.override(
-        task_id="hibernate_active"
-    )(active, True)
+    # desired standby
+    use_job_schedule.override(task_id="disable_scheduling_standby")(
+        standby, False
+    ) >> set_hibernation.override(task_id="hibernate_standby")(standby, True)
 
-    # standby
-    use_job_schedule.override(task_id="enable_scheduling_standby")(standby, True) >> set_hibernation.override(
-        task_id="wake_up_standby"
-    )(standby, False)
+    # desired active
+    use_job_schedule.override(task_id="enable_scheduling_active")(active, True) >> set_hibernation.override(
+        task_id="wake_up_active"
+    )(active, False)
 
 
 @dag(
@@ -372,8 +372,8 @@ dr_replication()
     max_active_runs=1,
 )
 def dr_failover():
-    deployments = get_deployments()
-    deployments >> set_failover_state() >> failover.expand_kwargs(deployments)
+    deployments = set_failover_state() >> get_deployments()
+    failover.expand_kwargs(deployments)
 
 
 dr_failover()
