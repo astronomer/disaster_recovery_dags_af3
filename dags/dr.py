@@ -1,10 +1,10 @@
 import json
 import logging
 import os
-import time
 from datetime import timedelta
 
 from airflow.exceptions import AirflowFailException
+from airflow.providers.standard.sensors.time_delta import WaitSensor
 from airflow.sdk import Param, PokeReturnValue, Variable, dag, get_current_context, task, task_group
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
@@ -80,7 +80,6 @@ def set_hibernation(deployment: Deployment, is_hibernating: bool) -> DeploymentH
 @task.sensor(poke_interval=10, timeout=600, mode="poke")
 def wait_for_deployment_wake_up(
     deployment: Deployment,
-    wake_wait_period: int = DR_WAKE_WAIT_PERIOD,
 ) -> PokeReturnValue:
     astro_client = AstroApiClient(DR_ORGANIZATION_ID, DR_API_KEY)
     deployment = astro_client.get_deployment(deployment.id)
@@ -90,13 +89,6 @@ def wait_for_deployment_wake_up(
         deployment.status,
         deployment.is_hibernating(),
     )
-
-    # wait at least wake_wait_period seconds to allow the deployment to update its status after triggering wake up, otherwise we might check too early and get a false positive
-    if (
-        deployment.updated_at is not None
-        and int(time.time()) - int(deployment.updated_at.timestamp()) < wake_wait_period
-    ):
-        return PokeReturnValue(is_done=False)
 
     if not deployment.is_hibernating() and deployment.status == "HEALTHY":
         logger.info("Deployment %s is awake", deployment.name)
@@ -308,10 +300,20 @@ def replicate(active: Deployment, standby: Deployment):
         standby, False
     ).as_setup()
 
-    active_woken_up = active_hibernation_override >> wait_for_deployment_wake_up.override(
+    wait_for_wake_priod_active = active_hibernation_override >> WaitSensor(
+        task_id="wait_for_wake_priod_active",
+        time_to_wait=timedelta(seconds=DR_WAKE_WAIT_PERIOD),
+    )
+
+    wait_for_wake_priod_standby = standby_hibernation_override >> WaitSensor(
+        task_id="wait_for_wake_priod_standby",
+        time_to_wait=timedelta(seconds=DR_WAKE_WAIT_PERIOD),
+    )
+
+    active_woken_up = wait_for_wake_priod_active >> wait_for_deployment_wake_up.override(
         task_id="wait_for_active",
     )(active)
-    standby_woken_up = standby_hibernation_override >> wait_for_deployment_wake_up.override(
+    standby_woken_up = wait_for_wake_priod_standby >> wait_for_deployment_wake_up.override(
         task_id="wait_for_standby",
     )(standby)
 
