@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 from datetime import timedelta
 
 from airflow.exceptions import AirflowFailException
@@ -28,6 +29,8 @@ DR_ORGANIZATION_ID = os.environ["DR_ORGANIZATION_ID"]
 """The ID of the Astronomer organization containing the deployments."""
 DR_SCHEDULE = os.getenv("DR_SCHEDULE")
 """Cron schedule for DR replication Dag."""
+DR_WAKE_WAIT_PERIOD = int(os.getenv("DR_WAKE_WAIT_PERIOD", 60))
+"""Time in seconds to wait after triggering a wake up before checking deployment status."""
 
 
 @task
@@ -75,7 +78,10 @@ def set_hibernation(deployment: Deployment, is_hibernating: bool) -> DeploymentH
 
 
 @task.sensor(poke_interval=10, timeout=600, mode="poke")
-def wait_for_deployment_wake_up(deployment: Deployment) -> PokeReturnValue:
+def wait_for_deployment_wake_up(
+    deployment: Deployment,
+    wake_wait_period: int = DR_WAKE_WAIT_PERIOD,
+) -> PokeReturnValue:
     astro_client = AstroApiClient(DR_ORGANIZATION_ID, DR_API_KEY)
     deployment = astro_client.get_deployment(deployment.id)
 
@@ -84,6 +90,13 @@ def wait_for_deployment_wake_up(deployment: Deployment) -> PokeReturnValue:
         deployment.status,
         deployment.is_hibernating(),
     )
+
+    # wait at least wake_wait_period seconds to allow the deployment to update its status after triggering wake up, otherwise we might check too early and get a false positive
+    if (
+        deployment.updated_at is not None
+        and int(time.time()) - int(deployment.updated_at.timestamp()) < wake_wait_period
+    ):
+        return PokeReturnValue(is_done=False)
 
     if not deployment.is_hibernating() and deployment.status == "HEALTHY":
         logger.info("Deployment %s is awake", deployment.name)
